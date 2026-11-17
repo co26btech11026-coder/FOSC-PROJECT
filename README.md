@@ -24,13 +24,13 @@
 ## **Roles and Responsibilities**
 
 1. **Sarvesh** – Performance Analysis: C vs Python vs NumPy (Memory and Time) 
-     [sarvesh_video](https://drive.google.com/file/d/12T-gBMn6vJrww1rvhiJVEJNsUPZeZrPZ/view?usp=drive_link)
+   [sarvesh_video](https://drive.google.com/file/d/12T-gBMn6vJrww1rvhiJVEJNsUPZeZrPZ/view?usp=drive_link)
 
 2. **Nihanth** – Results and Discussion
-    
+  
 
 3. **Sujato** – Introduction, Physical Model and Governing Equations, Numerical Implementation and Visualization
-
+   [sujato_video](https://drive.google.com/file/d/1RpXOflrpgO7PQajcicn2Kcw-KjIx1-A1/view?usp=drive_link)
 
 4. **Ishita** – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
 
@@ -39,6 +39,32 @@
 
 
 6. **Jatan** – Dissipation and Steady-State Analysis, Innovation and Optimization
+   
+
+
+
+
+
+
+
+1. [sarvesh_video](GOOGLE_DRIVE_LINK)
+2. [nihanth_video](GOOGLE_DRIVE_LINK)
+3. [sujato_video](GOOGLE_DRIVE_LINK)
+4. [ishita_video](GOOGLE_DRIVE_LINK)
+5. [sivanesh_video](GOOGLE_DRIVE_LINK)
+6. [jatan_video](GOOGLE_DRIVE_LINK)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
