@@ -16,7 +16,7 @@
 6. Verification and Testing
 7. Precision and Memory Study: Float32 vs Float64
 8. Computational Efficiency: Benchmarking Pairwise Distance Methods
-9. Performance Analysis: C vs Python vs NumPy
+9. Performance Analysis: C vs Python vs NumPy (memory and time)
 10. Dissipation and Steady-State Analysis
 11. Innovation and Optimization
 12. Results and Discussion
