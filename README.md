@@ -30,7 +30,7 @@
   
 
 3. **Sujato** – Introduction, Physical Model and Governing Equations, Numerical Implementation and Visualization
-   [sujato_video](https://drive.google.com/file/d/1RpXOflrpgO7PQajcicn2Kcw-KjIx1-A1/view?usp=drive_link)
+   [sujato_video](https://drive.google.com/file/d/1wJLc8UREQuPzCHwV5heGipkMz7N3numo/view?usp=drive_link)
 
 4. **Ishita** – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
 
