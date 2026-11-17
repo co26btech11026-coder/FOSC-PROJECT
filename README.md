@@ -1,5 +1,5 @@
 # FOSC-PROJECT
-#Team Members
+## Team Members
 1. Sarvesh - CO26BTECH11026
 2. Nihanth - CO26BTECH11007
 3. Sujato - CO26BTECH11029
