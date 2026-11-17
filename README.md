@@ -33,13 +33,13 @@
    [sujato_video](https://drive.google.com/file/d/1wJLc8UREQuPzCHwV5heGipkMz7N3numo/view?usp=drive_link)
 
 4. **Ishita** – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
-
+    [ishita_video](https://drive.google.com/file/d/1LTyBsgun8tZJOggCpszZLGb_zbLzS8P3/view?usp=drive_link)
 
 5. **Sivanesh** – Verification and Testing, Precision and Memory Study (Float32 vs Float64), Computational Efficiency: Benchmarking Pairwise Distance Methods
      [sivanesh_video](https://drive.google.com/file/d/1q8kLyDutqEkBd8gGqaJCAPL4HOHtbJzd/view?usp=drive_link)
 
 6. **Jatan** – Dissipation and Steady-State Analysis, Innovation and Optimization
-   
+
 
 
 
