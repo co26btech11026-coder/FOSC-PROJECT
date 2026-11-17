@@ -36,7 +36,7 @@
 
 
 5. **Sivanesh** – Verification and Testing, Precision and Memory Study (Float32 vs Float64), Computational Efficiency: Benchmarking Pairwise Distance Methods
-     [sivanesh_video](https://drive.google.com/file/d/1RpXOflrpgO7PQajcicn2Kcw-KjIx1-A1/view?usp=drive_link)
+     [sivanesh_video](https://drive.google.com/file/d/1q8kLyDutqEkBd8gGqaJCAPL4HOHtbJzd/view?usp=drive_link)
 
 6. **Jatan** – Dissipation and Steady-State Analysis, Innovation and Optimization
    
