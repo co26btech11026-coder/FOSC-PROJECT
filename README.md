@@ -22,16 +22,27 @@
 12. Results and Discussion
 
 ## Roles and Responsibilities
-1. Sarvesh – Performance Analysis: C vs Python vs NumPy (Memory and Time)
-   Video - https://drive.google.com/file/d/12T-gBMn6vJrww1rvhiJVEJNsUPZeZrPZ/view?            usp=drive_link
-3. Nihanth – Results and Discussion
-   video - 
-5. Sujato – Introduction, Physical Model and Governing Equations, Numerical Implementation and Visualization
-  video - https://drive.google.com/file/d/1wJLc8UREQuPzCHwV5heGipkMz7N3numo/view?usp=drive_link
-7. Ishita – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
-8. Sivanesh – Verification and Testing, Precision and Memory Study (Float32 vs Float64), Computational Efficiency: Benchmarking Pairwise Distance Methods
-9. Jatan – Dissipation and Steady-State Analysis, Innovation and Optimization
+Sarvesh – Performance Analysis: C vs Python vs NumPy (Memory and Time)
 
+
+
+Nihanth – Results and Discussion
+
+
+
+Sujato – Introduction, Physical Model and Governing Equations, Numerical Implementation and Visualization
+
+
+
+Ishita – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
+
+
+
+Sivanesh – Verification and Testing, Precision and Memory Study (Float32 vs Float64), Computational Efficiency: Benchmarking Pairwise Distance Methods
+
+
+
+Jatan – Dissipation and Steady-State Analysis, Innovation and Optimization
 
 
 
