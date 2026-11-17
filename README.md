@@ -1,2 +1,7 @@
 # FOSC-PROJECT
-Sarvesh ,Nihanth ,Sujato ,Ishita ,Sivanesh , Jatan
+Sarvesh	  CO26BTECH11026
+Nihanth	  CO26BTECH11007
+Sujato	  CO26BTECH11029
+Ishita	  CO26BTECH11009
+Sivanesh	CO26BTECH11025
+Jatan	    CO26BTECH11010
