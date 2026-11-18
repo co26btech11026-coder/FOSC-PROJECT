@@ -22,24 +22,32 @@
 12. Results and Discussion
 
 ## **Roles and Responsibilities**
-
-1. **Sarvesh** – Performance Analysis: C vs Python vs NumPy (Memory and Time) 
-   [sarvesh_video](https://drive.google.com/file/d/1StAy2ghC9a5BlZy4XgJRvZ40ftRjIxEz/view?usp=drive_link)
-
-2. **Nihanth** – Results and Discussion
-   [nihanth_video](https://drive.google.com/file/d/1ww4n9OLsoddjFKKcGHGCahn1kwWus_4m/view?usp=drive_link)
-
-3. **Sujato** – Introduction, Physical Model and Governing Equations, Numerical Implementation and Visualization
+1. **Sujato** – Introduction, Physical Model and Governing Equations, Numerical Implementation and Visualization
    [sujato_video](https://drive.google.com/file/d/1wJLc8UREQuPzCHwV5heGipkMz7N3numo/view?usp=drive_link)
 
-4. **Ishita** – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
-    [ishita_video](https://drive.google.com/file/d/1LTyBsgun8tZJOggCpszZLGb_zbLzS8P3/view?usp=drive_link)
+2. **Ishita** – Numerical Accuracy and Energy Analysis, Timestep Convergence Study
+    [ishita_video](https://drive.google.com/file/d/1LTyBsgun8tZJOggCpszZLGb_zbLzS8P3/view?usp=drive_link)  
 
-5. **Sivanesh** – Verification and Testing, Precision and Memory Study (Float32 vs Float64), Computational Efficiency: Benchmarking Pairwise Distance Methods
-     [sivanesh_video](https://drive.google.com/file/d/1q8kLyDutqEkBd8gGqaJCAPL4HOHtbJzd/view?usp=drive_link)
 
-6. **Jatan** – Dissipation and Steady-State Analysis, Innovation and Optimization
+3. **Sivanesh** – Verification and Testing, Precision and Memory Study (Float32 vs Float64), Computational Efficiency: Benchmarking Pairwise Distance Methods
+     [sivanesh_video](https://drive.google.com/file/d/1q8kLyDutqEkBd8gGqaJCAPL4HOHtbJzd/view?usp=drive_link)   
+
+4. **Sarvesh** – Performance Analysis: C vs Python vs NumPy (Memory and Time) 
+   [sarvesh_video](https://drive.google.com/file/d/1StAy2ghC9a5BlZy4XgJRvZ40ftRjIxEz/view?usp=drive_link)
+
+5. **Jatan** – Dissipation and Steady-State Analysis, Innovation and Optimization
      [jatan_video](https://drive.google.com/file/d/16i9KCvi8Efo3kmz6CkQX8CtY901j9d_9/view?usp=drive_link)
+
+6. **Nihanth** – Results and Discussion
+   [nihanth_video](https://drive.google.com/file/d/1ww4n9OLsoddjFKKcGHGCahn1kwWus_4m/view?usp=drive_link)
+
+
+
+
+
+
+
+
 
 
 
