@@ -1,0 +1,1009 @@
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
+# ==============================================================================
+# 1. FIXED SYSTEM & PHYSICS PARAMETERS
+# ==============================================================================
+L = 10.0                  # Box side length
+T_DEFAULT = 1000          # Default number of timesteps for single/animation runs
+
+# Baseline Harmonic Spring Parameters
+k_DEFAULT = 1.0           # Default spring stiffness constant (k)
+rc = 2.0                  # Neighbour interaction cutoff distance (rc)
+r0 = 1.2                  # Equilibrium resting spring length (r0)
+dt_BASELINE = 0.01        # Default timestep for Baseline spring simulator
+vel_max_BASELINE = 5.0    # Default maximum initial velocity component for Baseline
+
+# Stable Lennard-Jones Potential (LJP) Parameters (Tuned to prevent explosion)
+epsilon_DEFAULT = 1.0     # Depth of the LJP potential well (epsilon)
+sigma_DEFAULT = 0.8       # Collision diameter (sigma); rc = 2.0 = 2.5 * sigma
+dt_LJP = 0.001            # Smaller timestep required to resolve r^-12 repulsion
+vel_max_LJP = 2.5         # Moderate max velocity so KE is comparable to epsilon
+
+# Steady-state detection criteria (for Dissipation Study)
+steady_window = 100       # Number of steps in sliding window
+steady_threshold = 1e-3   # Relative energy variation threshold for steady state
+
+# Fixed random seed for reproducibility across comparative studies
+SEED = 42
+
+
+# ==============================================================================
+# 2. SAFE PARTICLE INITIALIZATION
+# ==============================================================================
+def initialize_particles(N, L, vel_max, model="baseline", sigma=sigma_DEFAULT, r0_val=r0, seed=SEED):
+    """
+    Initializes particle masses, positions, and velocities.
+    Uses rejection sampling for positions so particles do not start overlapping
+    (which prevents immediate r^-12 numerical explosions in LJP) or stuck on walls.
+    """
+    rng = np.random.default_rng(seed)
+    mass = np.ones(N)
+
+    # Keep particles inside valid wall boundaries
+    margin = (sigma / 2.0) if model == "ljp" else 0.05 * L
+    # Minimum safe initial distance between any two particles
+    min_dist = max(1.12 * sigma, 0.4) if model == "ljp" else 0.3
+
+    # Automatically reduce min_dist slightly if user enters a very large N
+    max_packing_dist = 0.65 * (L - 2 * margin) / np.sqrt(max(N, 1))
+    min_dist = min(min_dist, max_packing_dist)
+
+    pos = np.zeros((N, 2))
+    for i in range(N):
+        placed = False
+        for _ in range(5000):
+            candidate = rng.uniform(margin, L - margin, size=2)
+            if i == 0:
+                pos[i] = candidate
+                placed = True
+                break
+            dists = np.linalg.norm(pos[:i] - candidate, axis=1)
+            if np.all(dists >= min_dist):
+                pos[i] = candidate
+                placed = True
+                break
+        if not placed:
+            # Fallback if box is extremely crowded for very large N
+            pos[i] = rng.uniform(margin, L - margin, size=2)
+
+    vel = rng.uniform(-vel_max, vel_max, size=(N, 2))
+    return mass, pos, vel
+
+
+# ==============================================================================
+# 3. CORE PHYSICS FUNCTIONS (Vectorized, Unchanged Physics Formulation)
+# ==============================================================================
+def pairwise_distances(pos, rc_val=rc):
+    """
+    Computes pairwise displacement vectors, scalar distances, and boolean
+    neighbour mask using vectorized NumPy broadcasting.
+    """
+    # NxNx2 array of pairwise displacement vectors: r_i - r_j
+    d = pos[:, None, :] - pos[None, :, :]
+
+    # NxN array of scalar Euclidean distances
+    dist = np.sqrt(d[:, :, 0]**2 + d[:, :, 1]**2)
+
+    # Boolean mask: True if particles are within cutoff rc and not self-interacting
+    neighbours = (dist > 0.0) & (dist <= rc_val)
+
+    return d, dist, neighbours
+
+
+def pair_forces(pos, k_val=k_DEFAULT, r0_val=r0, rc_val=rc):
+    """
+    Calculates conservative harmonic spring forces on each particle from its
+    neighbours: F = -k * (r - r0) * r_hat.
+    """
+    d, dist, neighbours = pairwise_distances(pos, rc_val)
+
+    # Unit vectors (1e-12 prevents division by zero on the diagonal)
+    unit = d / (dist[:, :, None] + 1e-12)
+
+    # Spring force magnitude
+    f_mag = -k_val * (dist - r0_val) * neighbours
+
+    # Sum vector contributions from all neighbours
+    forces = np.sum(f_mag[:, :, None] * unit, axis=1)
+    return forces
+
+
+def pair_forces_ljp(pos, eps=epsilon_DEFAULT, sig=sigma_DEFAULT, rc_val=rc):
+    """
+    Calculates conservative Lennard-Jones forces on each particle:
+    V(r) = 4 * eps * [(sig / r)^12 - (sig / r)^6]
+    F(r) = (24 * eps / r) * [2 * (sig / r)^12 - (sig / r)^6]
+    """
+    d, dist, neighbours = pairwise_distances(pos, rc_val)
+
+    # Clamp minimum distance strictly in denominator to prevent floating-point
+    # overflow during extreme large-dt stress tests while preserving physics
+    safe_dist = np.maximum(dist, 1e-4)
+    unit = d / (dist[:, :, None] + 1e-12)
+
+    sr6 = (sig / safe_dist) ** 6
+    sr12 = sr6 ** 2
+
+    # LJP force magnitude
+    f_mag = (24.0 * eps / safe_dist) * (2.0 * sr12 - sr6) * neighbours
+
+    # Sum vector contributions from all neighbours
+    F_ljp = np.sum(f_mag[:, :, None] * unit, axis=1)
+    return F_ljp
+
+
+def internal_forces(pos, model="baseline", k_val=k_DEFAULT, r0_val=r0,
+                    rc_val=rc, eps=epsilon_DEFAULT, sig=sigma_DEFAULT):
+    """Dispatches conservative pairwise internal forces based on chosen model."""
+    if model == "ljp":
+        return pair_forces_ljp(pos, eps=eps, sig=sig, rc_val=rc_val)
+    return pair_forces(pos, k_val=k_val, r0_val=r0_val, rc_val=rc_val)
+
+
+def total_forces(pos, vel, gamma=0.0, model="baseline", k_val=k_DEFAULT,
+                 r0_val=r0, rc_val=rc, eps=epsilon_DEFAULT, sig=sigma_DEFAULT):
+    """Sums conservative pairwise forces and non-conservative viscous drag (-gamma * v)."""
+    f_cons = internal_forces(pos, model=model, k_val=k_val, r0_val=r0_val,
+                             rc_val=rc_val, eps=eps, sig=sig)
+    f_drag = -gamma * vel
+    return f_cons + f_drag
+
+
+def walls_reflect(pos, vel, L_val=L, margin=0.0):
+    """
+    Applies hard-wall reflective boundary conditions.
+    For Baseline: margin = 0.0 (walls at 0 and L).
+    For LJP:      margin = sigma / 2 (walls at sigma/2 and L - sigma/2).
+    """
+    min_bound = margin
+    max_bound = L_val - margin
+
+    # X-axis walls
+    left = pos[:, 0] < min_bound
+    right = pos[:, 0] > max_bound
+    vel[left, 0] = np.abs(vel[left, 0])     # Point velocity strictly inward
+    vel[right, 0] = -np.abs(vel[right, 0])  # Point velocity strictly inward
+    pos[left, 0] = min_bound
+    pos[right, 0] = max_bound
+
+    # Y-axis walls
+    bottom = pos[:, 1] < min_bound
+    top = pos[:, 1] > max_bound
+    vel[bottom, 1] = np.abs(vel[bottom, 1])
+    vel[top, 1] = -np.abs(vel[top, 1])
+    pos[bottom, 1] = min_bound
+    pos[top, 1] = max_bound
+
+    return pos, vel
+
+
+# ==============================================================================
+# 4. TIME INTEGRATION METHODS
+# ==============================================================================
+def step_smooth(pos, vel, mass, dt, L_val, gamma, F_prev, model="baseline",
+                k_val=k_DEFAULT, r0_val=r0, rc_val=rc,
+                eps=epsilon_DEFAULT, sig=sigma_DEFAULT):
+    """
+    Advances the simulation by one timestep dt using the Velocity Verlet
+    (smooth half-step velocity) update.
+    """
+    margin = (sig / 2.0) if model == "ljp" else 0.0
+
+    if F_prev is None:
+        F_prev = total_forces(pos, vel, gamma=gamma, model=model,
+                              k_val=k_val, r0_val=r0_val, rc_val=rc_val,
+                              eps=eps, sig=sig)
+
+    a_prev = F_prev / mass[:, None]
+
+    # Half-step velocity and full-step position update
+    vel_half = vel + 0.5 * a_prev * dt
+    pos_new = pos + vel_half * dt
+
+    # Reflect at walls once during position update
+    pos_new, vel_half = walls_reflect(pos_new, vel_half, L_val=L_val, margin=margin)
+
+    # Calculate new forces at the updated positions
+    F_new = total_forces(pos_new, vel_half, gamma=gamma, model=model,
+                         k_val=k_val, r0_val=r0_val, rc_val=rc_val,
+                         eps=eps, sig=sig)
+    a_new = F_new / mass[:, None]
+
+    # Complete velocity update
+    vel_new = vel_half + 0.5 * a_new * dt
+
+    return pos_new, vel_new, F_new
+
+
+def step_once(pos, vel, mass, dt, L_val, gamma=0.0, model="baseline",
+              k_val=k_DEFAULT, r0_val=r0, rc_val=rc,
+              eps=epsilon_DEFAULT, sig=sigma_DEFAULT):
+    """
+    Advances the simulation by one timestep dt using standard first-order
+    Euler-Cromer (full-step) integration (used for Integrator Comparison).
+    """
+    margin = (sig / 2.0) if model == "ljp" else 0.0
+    F = total_forces(pos, vel, gamma=gamma, model=model,
+                     k_val=k_val, r0_val=r0_val, rc_val=rc_val,
+                     eps=eps, sig=sig)
+    acc = F / mass[:, None]
+    vel_new = vel + acc * dt
+    pos_new = pos + vel_new * dt
+    pos_new, vel_new = walls_reflect(pos_new, vel_new, L_val=L_val, margin=margin)
+    return pos_new, vel_new
+
+
+# ==============================================================================
+# 5. ENERGY, ERROR & DIAGNOSTIC FUNCTIONS
+# ==============================================================================
+def kinetic_energy(vel, mass):
+    """Calculates total kinetic energy K = 0.5 * sum(m_i * v_i^2)."""
+    return 0.5 * np.sum(mass[:, None] * (vel ** 2))
+
+
+def potential_energy(pos, k_val=k_DEFAULT, r0_val=r0, rc_val=rc):
+    """Calculates total pairwise harmonic spring potential energy."""
+    _, dist, neighbours = pairwise_distances(pos, rc_val)
+    U_pairs = 0.5 * k_val * ((dist - r0_val) ** 2) * neighbours
+    # Factor 0.5 corrects for double-counting in symmetric distance matrix
+    return 0.5 * np.sum(U_pairs)
+
+
+def potential_energy_ljp(pos, eps=epsilon_DEFAULT, sig=sigma_DEFAULT, rc_val=rc):
+    """Calculates total pairwise Lennard-Jones potential energy."""
+    _, dist, neighbours = pairwise_distances(pos, rc_val)
+    safe_dist = np.maximum(dist, 1e-4)
+    sr6 = (sig / safe_dist) ** 6
+    sr12 = sr6 ** 2
+    U_pairs = 4.0 * eps * (sr12 - sr6) * neighbours
+    return 0.5 * np.sum(U_pairs)
+
+
+def compute_potential(pos, model="baseline", k_val=k_DEFAULT, r0_val=r0,
+                      rc_val=rc, eps=epsilon_DEFAULT, sig=sigma_DEFAULT):
+    """Dispatches potential energy calculation based on model."""
+    if model == "ljp":
+        return potential_energy_ljp(pos, eps=eps, sig=sig, rc_val=rc_val)
+    return potential_energy(pos, k_val=k_val, r0_val=r0_val, rc_val=rc_val)
+
+
+def mean_speed(vel):
+    """Calculates mean particle speed across the system."""
+    return np.mean(np.sqrt(np.sum(vel ** 2, axis=1)))
+
+
+def error_func(variation_E):
+    """
+    Calculates maximum relative deviation from initial mechanical energy:
+    max(|E(t) - E(0)|) / |E(0)|.
+    """
+    E0 = variation_E[0]
+    if abs(E0) < 1e-12:
+        return 0.0
+    return np.max(np.abs(variation_E - E0)) / abs(E0)
+
+
+def find_steady_state(time_arr, E_arr, window=steady_window, threshold=steady_threshold):
+    """
+    Identifies the earliest time at which total energy variation within a
+    sliding window of length `window` falls below `threshold * |E(0)|`.
+    """
+    E0 = E_arr[0]
+    if abs(E0) < 1e-12:
+        return None
+    for end in range(window, len(E_arr)):
+        start = end - window
+        window_energy = E_arr[start:end + 1]
+        rel_var = np.max(np.abs(window_energy - window_energy[0])) / abs(E0)
+        if rel_var < threshold:
+            return time_arr[end]
+    return None
+
+
+# ==============================================================================
+# 6. UNIFIED SIMULATION RUNNER
+# ==============================================================================
+def run_simulation(N, pos_init, vel_init, mass, dt, steps, gamma=0.0,
+                   model="baseline", k_val=k_DEFAULT, r0_val=r0, rc_val=rc,
+                   eps=epsilon_DEFAULT, sig=sigma_DEFAULT,
+                   record_trajectory=False, integrator="verlet"):
+    """
+    Runs a full simulation for `steps` timesteps, recording energies, heat
+    dissipation, Newton's 3rd Law internal force sum, and wall-clock runtime.
+    """
+    pos = pos_init.copy()
+    vel = vel_init.copy()
+    force = None
+
+    time_axis = np.arange(steps + 1) * dt
+    KE = np.zeros(steps + 1)
+    PE = np.zeros(steps + 1)
+    E_tot = np.zeros(steps + 1)
+    H_cum = np.zeros(steps + 1)       # Cumulative dissipated heat integral
+    dE_step = np.zeros(steps + 1)     # Stepwise energy change E[i] - E[i-1]
+    speed_mean = np.zeros(steps + 1)
+    F_sum = np.zeros(steps + 1)       # Sum of all internal forces (Newton's 3rd Law)
+
+    trajectory = np.zeros((steps + 1, N, 2)) if record_trajectory else None
+
+    # Log initial state (t = 0)
+    if record_trajectory:
+        trajectory[0] = pos.copy()
+    KE[0] = kinetic_energy(vel, mass)
+    PE[0] = compute_potential(pos, model=model, k_val=k_val, r0_val=r0_val,
+                              rc_val=rc_val, eps=eps, sig=sig)
+    E_tot[0] = KE[0] + PE[0]
+    speed_mean[0] = mean_speed(vel)
+    F_int_0 = internal_forces(pos, model=model, k_val=k_val, r0_val=r0_val,
+                              rc_val=rc_val, eps=eps, sig=sig)
+    F_sum[0] = np.sum(F_int_0)
+
+    # Start timer for pure physics integration loop
+    start_time = time.perf_counter()
+
+    for step in range(1, steps + 1):
+        if integrator == "euler":
+            pos, vel = step_once(pos, vel, mass, dt, L, gamma=gamma, model=model,
+                                 k_val=k_val, r0_val=r0_val, rc_val=rc_val,
+                                 eps=eps, sig=sig)
+        else:
+            pos, vel, force = step_smooth(pos, vel, mass, dt, L, gamma=gamma,
+                                          F_prev=force, model=model,
+                                          k_val=k_val, r0_val=r0_val, rc_val=rc_val,
+                                          eps=eps, sig=sig)
+
+        if record_trajectory:
+            trajectory[step] = pos.copy()
+
+        KE[step] = kinetic_energy(vel, mass)
+        PE[step] = compute_potential(pos, model=model, k_val=k_val, r0_val=r0_val,
+                                     rc_val=rc_val, eps=eps, sig=sig)
+        E_tot[step] = KE[step] + PE[step]
+        dE_step[step] = E_tot[step] - E_tot[step - 1]
+        H_cum[step] = H_cum[step - 1] + gamma * np.sum(mass[:, None] * (vel ** 2)) * dt
+        speed_mean[step] = mean_speed(vel)
+
+        # Record sum of internal forces for Newton's 3rd Law check
+        F_int = internal_forces(pos, model=model, k_val=k_val, r0_val=r0_val,
+                                rc_val=rc_val, eps=eps, sig=sig)
+        F_sum[step] = np.sum(F_int)
+
+    runtime = time.perf_counter() - start_time
+    max_rel_err = error_func(E_tot)
+    final_rel_err = abs(E_tot[-1] - E_tot[0]) / max(abs(E_tot[0]), 1e-12)
+
+    return {
+        "time": time_axis,
+        "KE": KE,
+        "PE": PE,
+        "E": E_tot,
+        "H": H_cum,
+        "dE": dE_step,
+        "mean_speed": speed_mean,
+        "F_sum": F_sum,
+        "trajectory": trajectory,
+        "runtime": runtime,
+        "max_rel_error": max_rel_err,
+        "final_rel_error": final_rel_err,
+        "dt": dt,
+        "steps": steps,
+    }
+
+
+# ==============================================================================
+# 7. MODE A: ANIMATION & ENERGY PLOT (Requirement 6)
+# ==============================================================================
+def run_animation_mode(N, model, gamma):
+    """
+    Runs the chosen simulator, shows the particle animation, plots KE, PE,
+    and Total Energy, and prints maximum relative energy deviation and runtime.
+    """
+    dt = dt_LJP if model == "ljp" else dt_BASELINE
+    vel_max = vel_max_LJP if model == "ljp" else vel_max_BASELINE
+    steps = T_DEFAULT
+
+    mass, pos_init, vel_init = initialize_particles(
+        N, L, vel_max, model=model, sigma=sigma_DEFAULT, seed=SEED
+    )
+
+    model_title = "Lennard-Jones Potential (LJP)" if model == "ljp" else f"Baseline Spring (gamma={gamma})"
+    print(f"\nRunning {model_title} Simulation for Animation (N={N}, dt={dt}, steps={steps})...")
+
+    res = run_simulation(
+        N, pos_init, vel_init, mass, dt=dt, steps=steps,
+        gamma=gamma, model=model, record_trajectory=True
+    )
+
+    # Display required metrics in console
+    print("\n" + "=" * 60)
+    print(f"SIMULATION SUMMARY ({model_title})")
+    print("=" * 60)
+    print(f"Number of particles (N)                    : {N}")
+    print(f"Timestep (dt)                              : {dt}")
+    print(f"Total steps (T)                            : {steps}")
+    print(f"Initial Total Energy E(0)                  : {res['E'][0]:.6f}")
+    print(f"Final Total Energy E(T)                    : {res['E'][-1]:.6f}")
+    print(f"Relative Maximum Deviation from Initial E  : {res['max_rel_error']:.6e}")
+    print(f"Max Abs Sum of Internal Forces (3rd Law)   : {np.max(np.abs(res['F_sum'])):.6e}")
+    print(f"System Time Taken to Run Simulation        : {res['runtime']:.6f} seconds")
+    print("=" * 60)
+
+    # 1. Particle Trajectory Animation
+    trajectory = res["trajectory"]
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_xlim(0, L)
+    ax.set_ylim(0, L)
+    ax.set_aspect("equal")
+    ax.set_title(f"Atomic Toy Model Animation ({model_title}, N={N})")
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("Y Position")
+    ax.grid(True, linestyle=":", alpha=0.5)
+
+    scatter = ax.scatter(
+        trajectory[0, :, 0], trajectory[0, :, 1],
+        c="royalblue", edgecolors="black", s=50, zorder=3
+    )
+
+    circles = []
+    if model == "ljp":
+        # Draw collision boundary circles of radius = sigma / 2 for LJP
+        for i in range(N):
+            circle = plt.Circle(
+                (trajectory[0, i, 0], trajectory[0, i, 1]),
+                radius=sigma_DEFAULT / 2.0,
+                edgecolor="crimson", facecolor="none",
+                linestyle="--", alpha=0.7, zorder=2
+            )
+            ax.add_patch(circle)
+            circles.append(circle)
+
+    # Step stride keeps animation smooth and responsive
+    stride = max(1, steps // 500)
+    frame_indices = range(0, steps + 1, stride)
+
+    def update(frame_idx):
+        scatter.set_offsets(trajectory[frame_idx])
+        if model == "ljp":
+            for i, circle in enumerate(circles):
+                circle.set_center((trajectory[frame_idx, i, 0], trajectory[frame_idx, i, 1]))
+            return [scatter] + circles
+        return [scatter]
+
+    anim = animation.FuncAnimation(
+        fig, update, frames=frame_indices, interval=20, blit=True
+    )
+    plt.tight_layout()
+    plt.show()
+
+    # 2. Energy Plots (KE, PE, and Total Energy)
+    plt.figure(figsize=(10, 6))
+    plt.plot(res["time"], res["KE"], label="Kinetic Energy K(t)", color="tab:blue")
+    plt.plot(res["time"], res["PE"], label="Potential Energy U(t)", color="tab:orange")
+    plt.plot(res["time"], res["E"], label="Total Energy E_tot(t)", color="black", linestyle="--", linewidth=2)
+    if gamma > 0.0:
+        plt.plot(res["time"], res["H"], label="Cumulative Heat Lost H(t)", color="tab:red", linestyle=":")
+
+    plt.xlabel("Time (t)")
+    plt.ylabel("Energy")
+    plt.title(
+        f"System Energies vs Time ({model_title})\n"
+        f"Max Rel Energy Deviation: {res['max_rel_error']:.3e} | Runtime: {res['runtime']:.4f} s"
+    )
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+# ==============================================================================
+# 8. MODE B: GRAPHICAL & COMPARATIVE STUDIES (Requirements 7 & 8)
+# ==============================================================================
+
+# --- Study 1: Comparison Between Various Values of Gamma (Dissipation Study) ---
+def study_gamma_comparison(N, gamma_list):
+    """
+    Compares system dynamics across multiple viscous drag coefficients (gamma).
+    Plots K(t), U(t), E(t), cumulative heat lost H(t), and Newton's 3rd Law verification,
+    and prints the objective steady-state analysis.
+    """
+    print("\n--- Study 1: Comparison Across Gamma Values (Dissipation Analysis) ---")
+    dt = dt_BASELINE
+    steps = T_DEFAULT
+    mass, pos_init, vel_init = initialize_particles(N, L, vel_max_BASELINE, model="baseline", seed=SEED)
+
+    results = {}
+    for g in gamma_list:
+        print(f"Running simulation for gamma = {g} ...")
+        results[g] = run_simulation(
+            N, pos_init, vel_init, mass, dt=dt, steps=steps, gamma=g, model="baseline"
+        )
+
+    # Plot 1: K(t), U(t), and E_total(t) subplots
+    fig, axes = plt.subplots(3, 1, figsize=(10, 11), sharex=True)
+    for g, res in results.items():
+        axes[0].plot(res["time"], res["KE"], label=f"gamma = {g}")
+        axes[1].plot(res["time"], res["PE"], label=f"gamma = {g}")
+        axes[2].plot(res["time"], res["E"], label=f"gamma = {g}")
+
+    axes[0].set_ylabel("Kinetic Energy K(t)")
+    axes[1].set_ylabel("Potential Energy U(t)")
+    axes[2].set_ylabel("Total Energy E(t)")
+    axes[2].set_xlabel("Time")
+    axes[0].set_title(f"Dissipation Study: Energies vs Time (N={N})")
+    for ax in axes:
+        ax.grid(True)
+        ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Plot 2: Cumulative Heat Lost H(t) & Newton's 3rd Law Check
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    for g, res in results.items():
+        ax1.plot(res["time"], res["H"], label=f"gamma = {g}")
+        ax2.plot(res["time"], res["F_sum"], label=f"gamma = {g}")
+
+    ax1.set_xlabel("Time")
+    ax1.set_ylabel("Cumulative Dissipated Energy H(t)")
+    ax1.set_title("Cumulative Heat Dissipation vs Time")
+    ax1.grid(True)
+    ax1.legend()
+
+    ax2.set_xlabel("Time")
+    ax2.set_ylabel("Sum of Internal Pair Forces")
+    ax2.set_title("Verification of Newton's 3rd Law (Sum F_int = 0)")
+    ax2.grid(True)
+    ax2.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Steady-state summary output
+    print("\nSteady-State Analysis Summary")
+    print("-" * 55)
+    for g, res in results.items():
+        steady_t = find_steady_state(res["time"], res["E"])
+        if steady_t is None:
+            print(f"gamma = {g:<6}: steady-state criterion NOT reached within t = {steps * dt:.2f}")
+        else:
+            print(f"gamma = {g:<6}: steady-state criterion first satisfied at t = {steady_t:.2f}")
+        print(f"    Initial Energy   = {res['E'][0]:.6f}")
+        print(f"    Final Energy     = {res['E'][-1]:.6f}")
+        print(f"    Final Mean Speed = {res['mean_speed'][-1]:.6e}")
+        print(f"    Final Heat Lost  = {res['H'][-1]:.6f}")
+        print(f"    Runtime          = {res['runtime']:.6f} s\n")
+
+
+# --- Study 2: Baseline vs LJP Across Several Runs ---
+def study_baseline_vs_ljp_runs(N, num_runs=5):
+    """
+    Compares Maximum Relative Energy Deviation, Execution Runtime, Energy Fluctuations,
+    and Newton's 3rd Law force balance between Baseline and LJP across multiple
+    independent runs (different initial seeds).
+    """
+    print(f"\n--- Study 2: Baseline vs LJP Comparison Across {num_runs} Independent Runs ---")
+    steps = T_DEFAULT
+
+    base_errors, ljp_errors = [], []
+    base_times, ljp_times = [], []
+    base_fsum_max, ljp_fsum_max = [], []
+
+    sample_base_res = None
+    sample_ljp_res = None
+
+    for run_idx in range(num_runs):
+        run_seed = SEED + run_idx * 101
+
+        # Baseline run
+        m_b, p_b, v_b = initialize_particles(N, L, vel_max_BASELINE, model="baseline", seed=run_seed)
+        res_b = run_simulation(N, p_b, v_b, m_b, dt=dt_BASELINE, steps=steps, gamma=0.0, model="baseline")
+        base_errors.append(res_b["max_rel_error"])
+        base_times.append(res_b["runtime"])
+        base_fsum_max.append(np.max(np.abs(res_b["F_sum"])))
+
+        # LJP run (using stable LJP parameters)
+        m_l, p_l, v_l = initialize_particles(N, L, vel_max_LJP, model="ljp", sigma=sigma_DEFAULT, seed=run_seed)
+        res_l = run_simulation(N, p_l, v_l, m_l, dt=dt_LJP, steps=steps, gamma=0.0, model="ljp")
+        ljp_errors.append(res_l["max_rel_error"])
+        ljp_times.append(res_l["runtime"])
+        ljp_fsum_max.append(np.max(np.abs(res_l["F_sum"])))
+
+        if run_idx == 0:
+            sample_base_res = res_b
+            sample_ljp_res = res_l
+
+        print(
+            f"Run {run_idx + 1}: "
+            f"Baseline [MaxRelErr={res_b['max_rel_error']:.3e}, Time={res_b['runtime']:.4f}s] | "
+            f"LJP [MaxRelErr={res_l['max_rel_error']:.3e}, Time={res_l['runtime']:.4f}s]"
+        )
+
+    runs_x = np.arange(1, num_runs + 1)
+    width = 0.35
+
+    # Figure 1: Bar Charts for Max Relative Energy Difference & Runtime across Runs
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax1.bar(runs_x - width / 2, base_errors, width, label="Baseline (Spring)", color="steelblue")
+    ax1.bar(runs_x + width / 2, ljp_errors, width, label="LJP Simulator", color="darkorange")
+    ax1.set_yscale("log")
+    ax1.set_xticks(runs_x)
+    ax1.set_xticklabels([f"Run {i}" for i in runs_x])
+    ax1.set_ylabel("Max Relative Energy Deviation (log scale)")
+    ax1.set_title("Max Relative Energy Difference: Baseline vs LJP")
+    ax1.legend()
+    ax1.grid(True, which="both", linestyle="--", alpha=0.5)
+
+    ax2.bar(runs_x - width / 2, base_times, width, label="Baseline (Spring)", color="steelblue")
+    ax2.bar(runs_x + width / 2, ljp_times, width, label="LJP Simulator", color="darkorange")
+    ax2.set_xticks(runs_x)
+    ax2.set_xticklabels([f"Run {i}" for i in runs_x])
+    ax2.set_ylabel("Execution Time (seconds)")
+    ax2.set_title("Simulation Runtime: Baseline vs LJP")
+    ax2.legend()
+    ax2.grid(True, linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Figure 2: Relative Energy Fluctuation & Newton's 3rd Law Verification (Sample Run 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    norm_steps = np.arange(steps + 1)
+    rel_E_base = (sample_base_res["E"] - sample_base_res["E"][0]) / abs(sample_base_res["E"][0])
+    rel_E_ljp = (sample_ljp_res["E"] - sample_ljp_res["E"][0]) / abs(sample_ljp_res["E"][0])
+
+    ax1.plot(norm_steps, rel_E_base, label="Baseline Relative dE/E(0)", color="steelblue")
+    ax1.plot(norm_steps, rel_E_ljp, label="LJP Relative dE/E(0)", color="darkorange", alpha=0.85)
+    ax1.set_xlabel("Timestep Index")
+    ax1.set_ylabel("(E(t) - E(0)) / |E(0)|")
+    ax1.set_title("Relative Energy Fluctuation Over Timesteps (Run 1)")
+    ax1.legend()
+    ax1.grid(True)
+
+    ax2.plot(norm_steps, sample_base_res["F_sum"], label="Baseline Sum(F_int)", color="steelblue")
+    ax2.plot(norm_steps, sample_ljp_res["F_sum"], label="LJP Sum(F_int)", color="darkorange", alpha=0.85)
+    ax2.set_xlabel("Timestep Index")
+    ax2.set_ylabel("Sum of All Internal Forces")
+    ax2.set_title("Newton's 3rd Law Verification (Sum of Forces = 0)")
+    ax2.legend()
+    ax2.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# --- Study 3: Comparison Between Various Timesteps (dt) ---
+def study_timestep_comparison(N, model="baseline"):
+    """
+    Studies how total energy fluctuates and how numerical error and runtime scale
+    across timesteps dt = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5] (plus finer steps for LJP).
+    """
+    print(f"\n--- Study 3: Timestep (dt) Sensitivity Analysis ({model.upper()}) ---")
+    # Include the exact prompt-requested timesteps; prepend finer steps if LJP is selected
+    dt_values = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
+    if model == "ljp":
+        dt_values = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05]
+        print("Note: For LJP, added fine timesteps [0.0005 .. 0.005] alongside larger dt to show stability boundary.")
+
+    total_time = 10.0 if model == "baseline" else 2.0
+    vel_max = vel_max_LJP if model == "ljp" else vel_max_BASELINE
+    mass, pos_init, vel_init = initialize_particles(N, L, vel_max, model=model, seed=SEED)
+
+    results = []
+    for dt_val in dt_values:
+        steps = max(10, int(round(total_time / dt_val)))
+        res = run_simulation(N, pos_init, vel_init, mass, dt=dt_val, steps=steps, gamma=0.0, model=model)
+        results.append(res)
+        print(
+            f"dt = {dt_val:<7} | steps = {steps:<5} | "
+            f"Max Rel Energy Error = {res['max_rel_error']:.4e} | "
+            f"Runtime = {res['runtime']:.5f} s"
+        )
+
+    # Plot 1: Total Energy E(t) Trajectories & Relative Energy Error
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+    for res in results:
+        dt_val = res["dt"]
+        ax1.plot(res["time"], res["E"], label=f"dt = {dt_val}")
+        rel_dev = np.abs(res["E"] - res["E"][0]) / max(abs(res["E"][0]), 1e-12)
+        ax2.plot(res["time"], rel_dev + 1e-16, label=f"dt = {dt_val}")
+
+    ax1.set_xlabel("Time (t)")
+    ax1.set_ylabel("Total Energy E(t)")
+    ax1.set_title(f"Total Energy Fluctuations Across Timesteps ({model.upper()})")
+    ax1.legend()
+    ax1.grid(True)
+
+    ax2.set_yscale("log")
+    ax2.set_xlabel("Time (t)")
+    ax2.set_ylabel("Relative Energy Deviation |E(t) - E(0)| / |E(0)|")
+    ax2.set_title("Log-Scale Relative Energy Fluctuation vs Time")
+    ax2.legend()
+    ax2.grid(True, which="both", linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+    # Plot 2: Max Relative Energy Error vs dt, Runtime vs dt, and Newton's 3rd Law
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+    dts = [r["dt"] for r in results]
+    max_errs = [r["max_rel_error"] for r in results]
+    runtimes = [r["runtime"] for r in results]
+
+    axes[0].loglog(dts, max_errs, marker="o", linewidth=2, color="crimson")
+    axes[0].set_xlabel("Timestep dt (log scale)")
+    axes[0].set_ylabel("Max Relative Energy Error (log scale)")
+    axes[0].set_title("Accuracy Trade-off: Max Energy Error vs dt")
+    axes[0].grid(True, which="both", linestyle="--", alpha=0.5)
+
+    axes[1].loglog(dts, runtimes, marker="s", linewidth=2, color="teal")
+    axes[1].set_xlabel("Timestep dt (log scale)")
+    axes[1].set_ylabel("Runtime in seconds (log scale)")
+    axes[1].set_title("Computational Cost: Runtime vs dt")
+    axes[1].grid(True, which="both", linestyle="--", alpha=0.5)
+
+    for res in results:
+        axes[2].plot(res["time"], res["F_sum"], label=f"dt = {res['dt']}")
+    axes[2].set_xlabel("Time (t)")
+    axes[2].set_ylabel("Sum of All Internal Forces")
+    axes[2].set_title("Newton's 3rd Law Verification Across dt")
+    axes[2].legend(fontsize=8)
+    axes[2].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# --- Study 4: How Energies Change With Spring Constant (k) ---
+def study_spring_constant_comparison(N):
+    """
+    Evaluates how Kinetic Energy K(t), Potential Energy U(t), Total Energy E(t),
+    and Relative Energy Error behave as the spring stiffness k varies.
+    """
+    print("\n--- Study 4: Sensitivity to Spring Constant (k) ---")
+    k_values = [0.2, 0.5, 1.0, 2.5, 5.0, 10.0]
+    dt = dt_BASELINE
+    steps = T_DEFAULT
+    mass, pos_init, vel_init = initialize_particles(N, L, vel_max_BASELINE, model="baseline", seed=SEED)
+
+    results = {}
+    for k_val in k_values:
+        res = run_simulation(
+            N, pos_init, vel_init, mass, dt=dt, steps=steps,
+            gamma=0.0, model="baseline", k_val=k_val
+        )
+        results[k_val] = res
+        print(
+            f"k = {k_val:<5} | E(0) = {res['E'][0]:<10.4f} | "
+            f"Mean U(t) = {np.mean(res['PE']):<10.4f} | "
+            f"Max Rel Energy Error = {res['max_rel_error']:.4e}"
+        )
+
+    # Plot 1: K(t), U(t), and E(t) for each k value
+    fig, axes = plt.subplots(3, 1, figsize=(10, 11), sharex=True)
+    for k_val, res in results.items():
+        axes[0].plot(res["time"], res["KE"], label=f"k = {k_val}")
+        axes[1].plot(res["time"], res["PE"], label=f"k = {k_val}")
+        axes[2].plot(res["time"], res["E"], label=f"k = {k_val}")
+
+    axes[0].set_ylabel("Kinetic Energy K(t)")
+    axes[1].set_ylabel("Potential Energy U(t)")
+    axes[2].set_ylabel("Total Energy E(t)")
+    axes[2].set_xlabel("Time (t)")
+    axes[0].set_title(f"Effect of Spring Constant (k) on System Energies (N={N}, dt={dt})")
+    for ax in axes:
+        ax.grid(True)
+        ax.legend(loc="upper right", ncol=2)
+    plt.tight_layout()
+    plt.show()
+
+    # Plot 2: Max Relative Error vs k and Newton's 3rd Law check
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    k_list = list(results.keys())
+    err_list = [results[k_v]["max_rel_error"] for k_v in k_list]
+
+    ax1.plot(k_list, err_list, marker="o", linewidth=2, color="purple")
+    ax1.set_xlabel("Spring Constant (k)")
+    ax1.set_ylabel("Max Relative Energy Error")
+    ax1.set_title("Energy Conservation Error vs Spring Stiffness (k)")
+    ax1.grid(True)
+
+    for k_val, res in results.items():
+        ax2.plot(res["time"], res["F_sum"], label=f"k = {k_val}")
+    ax2.set_xlabel("Time (t)")
+    ax2.set_ylabel("Sum of All Internal Forces")
+    ax2.set_title("Newton's 3rd Law Verification Across k")
+    ax2.legend()
+    ax2.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# --- Study 5: Additional Study - Integrator Comparison (Euler vs Velocity Verlet) & LJP Parameter Study ---
+def study_integrator_and_ljp_stability(N):
+    """
+    Additional Study (Requirement 7.5):
+    Part A: Compares 1st-order Euler (step_once) vs 2nd-order Velocity Verlet (step_smooth).
+    Part B: Compares LJP stability across different (epsilon, sigma) combinations.
+    """
+    print("\n--- Study 5: Integrator Comparison (Euler vs Velocity Verlet) & LJP Parameter Study ---")
+    steps = 1000
+    mass, pos_init, vel_init = initialize_particles(N, L, vel_max_BASELINE, model="baseline", seed=SEED)
+
+    res_verlet = run_simulation(
+        N, pos_init, vel_init, mass, dt=dt_BASELINE, steps=steps,
+        gamma=0.0, model="baseline", integrator="verlet"
+    )
+    res_euler = run_simulation(
+        N, pos_init, vel_init, mass, dt=dt_BASELINE, steps=steps,
+        gamma=0.0, model="baseline", integrator="euler"
+    )
+
+    print(f"Velocity Verlet Max Rel Energy Error : {res_verlet['max_rel_error']:.4e}")
+    print(f"Euler-Cromer    Max Rel Energy Error : {res_euler['max_rel_error']:.4e}")
+
+    # Plot Part A: Integrator comparison + Newton's 3rd Law
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    ax1.plot(res_verlet["time"], res_verlet["E"], label="Velocity Verlet (step_smooth)", linewidth=2)
+    ax1.plot(res_euler["time"], res_euler["E"], label="Euler (step_once)", linestyle="--")
+    ax1.set_xlabel("Time (t)")
+    ax1.set_ylabel("Total Energy E(t)")
+    ax1.set_title("Integrator Comparison: Velocity Verlet vs Euler")
+    ax1.legend()
+    ax1.grid(True)
+
+    ax2.plot(res_verlet["time"], res_verlet["F_sum"], label="Velocity Verlet Sum(F_int)")
+    ax2.plot(res_euler["time"], res_euler["F_sum"], label="Euler Sum(F_int)", alpha=0.7)
+    ax2.set_xlabel("Time (t)")
+    ax2.set_ylabel("Sum of All Internal Forces")
+    ax2.set_title("Newton's 3rd Law Verification (Internal Force Sum = 0)")
+    ax2.legend()
+    ax2.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # Part B: LJP Parameter Sensitivity (varying epsilon)
+    eps_values = [0.5, 1.0, 2.0, 5.0]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    mass_l, pos_l, vel_l = initialize_particles(N, L, vel_max_LJP, model="ljp", sigma=sigma_DEFAULT, seed=SEED)
+
+    for eps_val in eps_values:
+        res_l = run_simulation(
+            N, pos_l, vel_l, mass_l, dt=dt_LJP, steps=steps,
+            gamma=0.0, model="ljp", eps=eps_val, sig=sigma_DEFAULT
+        )
+        rel_err_t = (res_l["E"] - res_l["E"][0]) / abs(res_l["E"][0])
+        ax1.plot(res_l["time"], res_l["E"], label=f"epsilon = {eps_val}")
+        ax2.plot(res_l["time"], rel_err_t, label=f"epsilon = {eps_val} (MaxErr={res_l['max_rel_error']:.2e})")
+        print(f"LJP epsilon = {eps_val:<4} | Max Rel Energy Error = {res_l['max_rel_error']:.4e}")
+
+    ax1.set_xlabel("Time (t)")
+    ax1.set_ylabel("Total Energy E(t)")
+    ax1.set_title(f"LJP Total Energy for Various Well Depths epsilon (sigma={sigma_DEFAULT})")
+    ax1.legend()
+    ax1.grid(True)
+
+    ax2.set_xlabel("Time (t)")
+    ax2.set_ylabel("Relative Energy Deviation (E(t) - E(0)) / |E(0)|")
+    ax2.set_title("LJP Relative Energy Fluctuation vs epsilon")
+    ax2.legend()
+    ax2.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+# ==============================================================================
+# 9. INTERACTIVE COMMAND-LINE MENU (Requirements 1 - 7)
+# ==============================================================================
+def main():
+    print("=" * 70)
+    print("   UNIFIED PARTICLE DYNAMICS SIMULATOR (BASELINE SPRING & LJP)")
+    print("=" * 70)
+
+    # 1. Prompt user for N
+    n_input = input("1. Enter the number of particles N [default = 25]: ").strip()
+    try:
+        N = int(n_input) if n_input else 25
+        if N < 2:
+            print("   N must be at least 2. Setting N = 25.")
+            N = 25
+    except ValueError:
+        print("   Invalid input. Setting N = 25.")
+        N = 25
+
+    # 3. Allow user to choose between Baseline simulator or LJP simulator
+    print("\n2. Choose the Simulator Model:")
+    print("   [1] Baseline Harmonic Spring Simulator")
+    print("   [2] Lennard-Jones Potential (LJP) Simulator")
+    model_choice = input("   Enter choice (1 or 2) [default = 1]: ").strip()
+    model = "ljp" if model_choice == "2" else "baseline"
+
+    # 4. For baseline simulator, allow user to choose/type gamma values
+    gamma_single = 0.0
+    gamma_list = [0.0, 0.05, 0.1, 0.5]
+    if model == "baseline":
+        g_in = input(
+            "\n3. Enter viscous drag gamma for single/animation run (e.g. 0.0, 0.05, 0.1)\n"
+            "   or comma-separated list for gamma study [default = 0.0]: "
+        ).strip()
+        if g_in:
+            try:
+                parsed = [float(x.strip()) for x in g_in.split(",") if x.strip() != ""]
+                if len(parsed) == 1:
+                    gamma_single = parsed[0]
+                    if gamma_single not in gamma_list:
+                        gamma_list = sorted(list(set(gamma_list + [gamma_single])))
+                elif len(parsed) > 1:
+                    gamma_list = parsed
+                    gamma_single = parsed[0]
+            except ValueError:
+                print("   Invalid gamma input. Using default gamma = 0.0.")
+
+    # 5. Allow user to choose between Animation or Graphical/Comparative Studies
+    print("\n4. Choose Execution Mode:")
+    print("   [1] Animation Mode (Particle Animation + KE/PE/Total Energy Plot + Error & Runtime)")
+    print("   [2] Graphical & Comparative Analysis Studies")
+    mode_choice = input("   Enter choice (1 or 2) [default = 1]: ").strip()
+
+    if mode_choice != "2":
+        # 6. Animation Mode (no comparative analysis, only animation + energy plot + metrics)
+        run_animation_mode(N, model=model, gamma=gamma_single)
+    else:
+        # 7. Graphical & Comparative Studies Menu
+        while True:
+            print("\n" + "=" * 70)
+            print("   GRAPHICAL & COMPARATIVE ANALYSIS MENU")
+            print("=" * 70)
+            print("   [1] Comparison between various values of gamma (Dissipation Study)")
+            print("   [2] Comparison of Max Relative Energy Difference & Runtime: Baseline vs LJP (Multiple Runs)")
+            print("   [3] Comparison between various timesteps (dt = 0.01, 0.02, 0.05, 0.1, 0.2, 0.5)")
+            print("   [4] How energies change with Spring Constant (k)")
+            print("   [5] Integrator Comparison (Euler vs Velocity Verlet) & LJP Parameter Sensitivity")
+            print("   [6] Run ALL Comparative Studies")
+            print("   [0] Exit")
+
+            study_choice = input("\n   Select analysis to view (0-6): ").strip()
+
+            if study_choice == "1":
+                custom_g = input(
+                    f"   Enter comma-separated gamma values [Press Enter for {gamma_list}]: "
+                ).strip()
+                if custom_g:
+                    try:
+                        gamma_list = [float(x.strip()) for x in custom_g.split(",") if x.strip() != ""]
+                    except ValueError:
+                        print("   Invalid list; using previous gamma list.")
+                study_gamma_comparison(N, gamma_list)
+
+            elif study_choice == "2":
+                runs_in = input("   Enter number of independent runs to compare [default = 5]: ").strip()
+                num_runs = int(runs_in) if runs_in.isdigit() and int(runs_in) > 0 else 5
+                study_baseline_vs_ljp_runs(N, num_runs=num_runs)
+
+            elif study_choice == "3":
+                study_timestep_comparison(N, model=model)
+
+            elif study_choice == "4":
+                study_spring_constant_comparison(N)
+
+            elif study_choice == "5":
+                study_integrator_and_ljp_stability(N)
+
+            elif study_choice == "6":
+                study_gamma_comparison(N, gamma_list)
+                study_baseline_vs_ljp_runs(N, num_runs=5)
+                study_timestep_comparison(N, model=model)
+                study_spring_constant_comparison(N)
+                study_integrator_and_ljp_stability(N)
+
+            elif study_choice == "0":
+                print("Exiting simulator.")
+                break
+            else:
+                print("   Invalid choice. Please enter a number from 0 to 6.")
+
+
+if __name__ == "__main__":
+    main()
