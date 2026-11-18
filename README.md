@@ -39,7 +39,7 @@
      [sivanesh_video](https://drive.google.com/file/d/1q8kLyDutqEkBd8gGqaJCAPL4HOHtbJzd/view?usp=drive_link)
 
 6. **Jatan** – Dissipation and Steady-State Analysis, Innovation and Optimization
-
+     [jatan_video](https://drive.google.com/file/d/16i9KCvi8Efo3kmz6CkQX8CtY901j9d_9/view?usp=drive_link)
 
 
 
